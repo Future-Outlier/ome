@@ -1,0 +1,22 @@
+title: KVCachePool Custom Resource
+oep-number: 0010
+authors:
+  - "@YouNeedCryDear"
+status: provisional
+creation-date: 2026-05-09
+reviewers:
+  - "@slin1237"
+approvers:
+  - "@slin1237"
+
+# The target maturity stage in the current dev cycle for this OEP.
+stage: alpha
+
+# The following PRR answers are required at beta release
+metrics:
+  - ome_kvcachepool_reconcile_total
+  - ome_kvcachepool_reconcile_duration_seconds
+  - ome_kvcachepool_ready
+  - ome_kvcachepool_connection_ready
+  - ome_kvcache_connector_injection_total
+  - ome_kvcache_provider_errors_total
