@@ -6,7 +6,6 @@ import (
 
 	"github.com/go-playground/validator/v10"
 	v1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/resource"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"sigs.k8s.io/ome/pkg/constants"
@@ -33,15 +32,15 @@ type FineTunedAdapterInjector struct {
 }
 
 // newFineTunedAdapterInjector initializes a FineTunedAdapterInjector from a ConfigMap.
-func newFineTunedAdapterInjector(configMap *v1.ConfigMap, client client.Client) *FineTunedAdapterInjector {
+func newFineTunedAdapterInjector(configMap *v1.ConfigMap, client client.Client) (*FineTunedAdapterInjector, error) {
 	fineTunedAdapterInjector := &FineTunedAdapterInjector{}
 	if fineTunedAdapterConfigVal, ok := configMap.Data[fineTunedAdapterConfigMapKeyName]; ok {
 		if err := json.Unmarshal([]byte(fineTunedAdapterConfigVal), fineTunedAdapterInjector); err != nil {
-			panic(fmt.Errorf("unable to unmarshal %v json string: %w", fineTunedAdapterConfigMapKeyName, err))
+			return nil, fmt.Errorf("unable to unmarshal %v json string: %w", fineTunedAdapterConfigMapKeyName, err)
 		}
 	}
 	fineTunedAdapterInjector.client = client
-	return fineTunedAdapterInjector
+	return fineTunedAdapterInjector, nil
 }
 
 // InjectFineTunedAdapter injects the fine-tuned weight initialization container into the pod if necessary.
@@ -72,7 +71,10 @@ func (fa *FineTunedAdapterInjector) injectFineTunedAdapter(pod *v1.Pod) error {
 
 	modelInitMounts := fa.getVolumeMounts(pod)
 
-	fineTunedWeightUri, _ := fa.getFineTunedWeightUri(pod)
+	fineTunedWeightUri, err := fa.getFineTunedWeightUri(pod)
+	if err != nil {
+		return err
+	}
 
 	initEnvs, err := fa.getModelInitEnvs(pod, fineTunedWeightUri)
 	if err != nil {
@@ -84,7 +86,10 @@ func (fa *FineTunedAdapterInjector) injectFineTunedAdapter(pod *v1.Pod) error {
 		return err
 	}
 
-	initContainer := fa.createInitContainer(initEnvs, modelInitMounts, securityContext)
+	initContainer, err := fa.createInitContainer(initEnvs, modelInitMounts, securityContext)
+	if err != nil {
+		return err
+	}
 	pod.Spec.InitContainers = append(pod.Spec.InitContainers, *initContainer)
 	return nil
 }
@@ -111,7 +116,12 @@ func (fa *FineTunedAdapterInjector) getVolumeMounts(pod *v1.Pod) []v1.VolumeMoun
 }
 
 // createInitContainer constructs the init container configuration.
-func (fa *FineTunedAdapterInjector) createInitContainer(envs []v1.EnvVar, mounts []v1.VolumeMount, securityContext *v1.SecurityContext) *v1.Container {
+func (fa *FineTunedAdapterInjector) createInitContainer(envs []v1.EnvVar, mounts []v1.VolumeMount, securityContext *v1.SecurityContext) (*v1.Container, error) {
+	resources, err := newResourceRequirements(fa.CpuLimit, fa.MemoryLimit, fa.CpuRequest, fa.MemoryRequest)
+	if err != nil {
+		return nil, err
+	}
+
 	return &v1.Container{
 		Name:                     constants.FineTunedAdapterContainerName,
 		Image:                    fa.Image,
@@ -119,18 +129,9 @@ func (fa *FineTunedAdapterInjector) createInitContainer(envs []v1.EnvVar, mounts
 		Env:                      envs,
 		VolumeMounts:             mounts,
 		Args:                     []string{"fine-tuned-adapter", "--config", "/ome-agent.yaml", "--debug"},
-		Resources: v1.ResourceRequirements{
-			Limits: map[v1.ResourceName]resource.Quantity{
-				v1.ResourceCPU:    resource.MustParse(fa.CpuLimit),
-				v1.ResourceMemory: resource.MustParse(fa.MemoryLimit),
-			},
-			Requests: map[v1.ResourceName]resource.Quantity{
-				v1.ResourceCPU:    resource.MustParse(fa.CpuRequest),
-				v1.ResourceMemory: resource.MustParse(fa.MemoryRequest),
-			},
-		},
-		SecurityContext: securityContext,
-	}
+		Resources:                resources,
+		SecurityContext:          securityContext,
+	}, nil
 }
 
 // getFineTunedWeightUri retrieves the fine-tuned weight uri from the fine-tuned weight CR
@@ -138,6 +139,10 @@ func (fa *FineTunedAdapterInjector) getFineTunedWeightUri(pod *v1.Pod) (*storage
 	fineTunedWeight, err := isvcutils.GetFineTunedWeight(fa.client, fa.fineTunedWeightName)
 	if err != nil {
 		return nil, err
+	}
+
+	if fineTunedWeight.Spec.Storage == nil || fineTunedWeight.Spec.Storage.StorageUri == nil || *fineTunedWeight.Spec.Storage.StorageUri == "" {
+		return nil, fmt.Errorf("fine-tuned weight %q storage.storageUri is required", fa.fineTunedWeightName)
 	}
 
 	osUri, err := storage.ParseOCIStorageURI(*fineTunedWeight.Spec.Storage.StorageUri)
